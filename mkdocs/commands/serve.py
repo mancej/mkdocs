@@ -1,13 +1,18 @@
 import logging
 import shutil
 import tempfile
+import time
 import sys
+import re
 
 from os.path import isfile, join
 from mkdocs.commands.build import build
 from mkdocs.config import load_config
 
 log = logging.getLogger(__name__)
+
+last_build = time.time()
+built_before = False
 
 
 def _init_asyncio_patch():
@@ -31,7 +36,6 @@ def _init_asyncio_patch():
 
 
 def _get_handler(site_dir, StaticFileHandler):
-
     from tornado.template import Loader
 
     class WebHandler(StaticFileHandler):
@@ -48,8 +52,19 @@ def _get_handler(site_dir, StaticFileHandler):
     return WebHandler
 
 
-def _livereload(host, port, config, builder, site_dir):
+def should_ignore(file_path: str):
+    is_material = re.match(r'.*mkdocs-material/material/.*', file_path)
+    if is_material:
+        if re.match(r'.*mkdocs-material/material/.*home.html', file_path):
+            return False
+        if re.match(f'.*mkdocs-material/material/.*reload.txt', file_path):
+            return False
 
+        return True
+
+    return False
+
+def _livereload(host, port, config, builder, site_dir):
     # We are importing here for anyone that has issues with livereload. Even if
     # this fails, the --no-livereload alternative should still work.
     _init_asyncio_patch()
@@ -66,20 +81,19 @@ def _livereload(host, port, config, builder, site_dir):
     server = LiveReloadServer()
 
     # Watch the documentation files, the config file and the theme files.
-    server.watch(config['docs_dir'], builder)
-    server.watch(config['config_file_path'], builder)
-
+    server.watch(config['docs_dir'], builder, ignore=should_ignore)
+    server.watch(config['config_file_path'], builder, ignore=should_ignore)
+    print("Watching STUFF!!")
     for d in config['theme'].dirs:
-        server.watch(d, builder)
+        server.watch(d, builder, ignore=should_ignore)
 
     # Run `serve` plugin events.
     server = config['plugins'].run_event('serve', server, config=config, builder=builder)
 
-    server.serve(root=site_dir, host=host, port=port, restart_delay=0)
+    server.serve(root=site_dir, host=host, port=port, restart_delay=2)
 
 
 def _static_server(host, port, site_dir):
-
     # Importing here to separate the code paths from the --livereload
     # alternative.
     _init_asyncio_patch()
@@ -118,6 +132,12 @@ def serve(config_file=None, dev_addr=None, strict=None, theme=None,
     site_dir = tempfile.mkdtemp(prefix='mkdocs_')
 
     def builder():
+        # global last_build, built_before
+        # now = time.time()
+        # if now - last_build < 20 and built_before:
+        #     print("Skipping reload, this shit JUST FUCKING RELOADED")
+        #     return
+
         log.info("Building documentation...")
         config = load_config(
             config_file=config_file,
@@ -128,12 +148,14 @@ def serve(config_file=None, dev_addr=None, strict=None, theme=None,
             site_dir=site_dir,
             **kwargs
         )
+
         # Override a few config settings after validation
         config['site_url'] = 'http://{}/'.format(config['dev_addr'])
 
         live_server = livereload in ['dirty', 'livereload']
         dirty = livereload == 'dirty'
         build(config, live_server=live_server, dirty=dirty)
+        built_before = True
         return config
 
     try:
